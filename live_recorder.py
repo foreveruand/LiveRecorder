@@ -35,6 +35,7 @@ class LiveRecoder:
         name = user.get('name', self.id)
         self.flag = f'[{platform}][{name}]'
         
+        
         self.interval = user.get('interval', 10)
         self.crypto_js_url = user.get('crypto_js_url', '')
         self.headers = user.get('headers', {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0'})
@@ -94,6 +95,8 @@ class LiveRecoder:
     async def start(self):
         self.ssl = True
         self.mState = 0
+        self.ssl = True
+        self.mState = 0
         while True:
             try:
                 # 禁用时段检查：在禁用时间内只等待，不发起任何请求
@@ -133,8 +136,16 @@ class LiveRecoder:
         except httpx.HTTPStatusError as error:
             raise ConnectionError(
                 f'{self.flag}直播检测请求状态码错误\n{error}\n{response.text}')
+        except httpx.HTTPStatusError as error:
+            raise ConnectionError(
+                f'{self.flag}直播检测请求状态码错误\n{error}\n{response.text}')
         except anyio.EndOfStream as error:
             raise ConnectionError(f'{self.flag}直播检测代理错误\n{error}')
+        except httpx.HTTPError as error:
+           logger.error(f'网络异常 重试...')
+           raise ConnectionError(f'{self.flag}直播检测请求错误\n{repr(error)}')
+		
+           
         except httpx.HTTPError as error:
            logger.error(f'网络异常 重试...')
            raise ConnectionError(f'{self.flag}直播检测请求错误\n{repr(error)}')
@@ -190,6 +201,9 @@ class LiveRecoder:
         ssl = self.ssl
         logger.info(f'是否验证SSL：{ssl}')
         session.set_option('http-ssl-verify', ssl)
+        ssl = self.ssl
+        logger.info(f'是否验证SSL：{ssl}')
+        session.set_option('http-ssl-verify', ssl)
         # 添加streamlink的http相关选项
         if proxy := self.proxy:
             # 代理为socks5时，streamlink的代理参数需要改为socks5h，防止部分直播源获取失败
@@ -230,6 +244,9 @@ class LiveRecoder:
         except Exception as error:
             if 'timeout' in str(error):
                 logger.warning(f'{self.flag}直播录制超时，请检查主播是否正常开播或网络连接是否正常：{filename}\n{error}')
+            elif re.search(f'SSL: CERTIFICATE_VERIFY_FAILED', str(error)):
+                logger.warning(f'{self.flag}SSL错误，将取消SSL验证：{filename}\n{error}')
+                self.ssl = False
             elif re.search(f'SSL: CERTIFICATE_VERIFY_FAILED', str(error)):
                 logger.warning(f'{self.flag}SSL错误，将取消SSL验证：{filename}\n{error}')
                 self.ssl = False
@@ -310,6 +327,21 @@ class Douyu(LiveRecoder):
                     await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
             else:
                 self.ssl = True
+            state = response['data']['room_status']
+            self.mState = state
+            logger.info(
+                f'直播状态[1已开播，2未开播]：{state} 上一次开播时间：{response["data"]["start_time"]}')
+            if state == '1':
+                liveUrl = await self.get_live()
+                if liveUrl != '':
+                    title = response['data']['room_name']
+                    stream = HTTPStream(
+                        self.get_streamlink(),
+                        liveUrl
+                    )  # HTTPStream[flv]
+                    await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
+            else:
+                self.ssl = True
 
     async def get_js(self):
         response = (await self.request(
@@ -318,8 +350,10 @@ class Douyu(LiveRecoder):
         )).json()
         js_enc = response['data'][f'room{self.id}']
         getUrl = self.crypto_js_url
+        getUrl = self.crypto_js_url
         crypto_js = (await self.request(
             method='GET',
+            url= getUrl
             url= getUrl
         )).text
         return jsengine.JSEngine(js_enc + crypto_js)
@@ -341,6 +375,9 @@ class Douyu(LiveRecoder):
             url=f'https://www.douyu.com/lapi/live/getH5Play/{self.id}',
             params=params
         )).json()
+        if response['data'] == '' and response['msg'] != '':
+            logger.info(f'直播状态：{response["error"]} {response["msg"]}')
+            return ''
         if response['data'] == '' and response['msg'] != '':
             logger.info(f'直播状态：{response["error"]} {response["msg"]}')
             return ''

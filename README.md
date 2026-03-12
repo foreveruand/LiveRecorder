@@ -1,5 +1,8 @@
 <img src="https://socialify.git.ci/auqhjjqdo/LiveRecorder/image?font=Inter&forks=1&issues=1&language=1&name=1&owner=1&pattern=Circuit%20Board&pulls=1&stargazers=1&theme=Auto" alt="LiveRecorder"/>
 
+## 相较原项目改动：
+- 增加`blackwords` `whitewords`通过正则过滤直播标题
+- 增加`disable_hours` 禁用录播时间段，支持指定时区 `"05:00-21:00/Asia/Shanghai"`
 ## 简介
 
 一款无人值守直播录制脚本，基于强大的[Streamlink](https://streamlink.github.io)

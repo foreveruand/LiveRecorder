@@ -8,8 +8,6 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Dict, Tuple, Union
 from urllib.parse import parse_qs
-from datetime import datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import anyio
 import ffmpeg
@@ -34,85 +32,23 @@ class LiveRecoder:
         platform = user['platform']
         name = user.get('name', self.id)
         self.flag = f'[{platform}][{name}]'
-        
+
         self.interval = user.get('interval', 10)
-        self.crypto_js_url = user.get('crypto_js_url', '')
-        self.headers = user.get('headers', {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0'})
+        self.headers = user.get('headers', {'User-Agent': 'Chrome'})
         self.cookies = user.get('cookies')
         self.format = user.get('format')
         self.proxy = user.get('proxy', config.get('proxy'))
         self.output = user.get('output', config.get('output', 'output'))
-        self.blackwords = user.get('blackwords', "")
-        self.disable_hours = user.get('disable_hours', '')
-        self.whitewords = user.get('whitewords', "")
-        if not self.crypto_js_url:
-            self.crypto_js_url = 'https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js'
+
         self.get_cookies()
         self.client = self.get_client()
-    def is_disabled_now(self) -> bool:
-        """
-        判断当前时间是否处于禁用时段。
-        disable_hours 格式: "HH:MM-HH:MM" 或 "HH:MM-HH:MM/Timezone"
-        返回 True 表示当前处于禁用时段，应跳过录制。
-        """
-        field = self.disable_hours
-        if not field:
-            return False
- 
-        # 解析时间段和时区
-        if '/' in field:
-            range_part, tz_name = field.rsplit('/', 1)
-        else:
-            range_part, tz_name = field, ''
- 
-        try:
-            tz = ZoneInfo(tz_name) if tz_name else None
-        except ZoneInfoNotFoundError:
-            logger.warning(f'{self.flag} 无效时区 "{tz_name}"，回退到系统时区')
-            tz = None
- 
-        now = datetime.now(tz=tz)
-        now_minutes = now.hour * 60 + now.minute
- 
-        try:
-            start_str, end_str = range_part.split('-', 1)
-            sh, sm = map(int, start_str.split(':'))
-            eh, em = map(int, end_str.split(':'))
-        except ValueError:
-            logger.warning(f'{self.flag} disable_hours 格式错误："{field}"，忽略禁用时段')
-            return False
- 
-        s = sh * 60 + sm
-        e = eh * 60 + em
- 
-        if s < e:
-            # 普通时间段，如 02:00-08:00
-            return s <= now_minutes < e
-        else:
-            # 跨午夜，如 23:00-06:00
-            return now_minutes >= s or now_minutes < e
+
     async def start(self):
-        self.ssl = True
-        self.mState = 0
+        logger.info(f'{self.flag}正在检测直播状态')
         while True:
             try:
-                # 禁用时段检查：在禁用时间内只等待，不发起任何请求
-                if self.is_disabled_now():
-                    logger.info(f'{self.flag} 处于禁用时段（{self.disable_hours}），跳过检测')
-                    await asyncio.sleep(60)
-                    continue
-                logger.info(f'{self.flag}正在检测直播状态')
-                logger.info(f'预配置刷新间隔：{self.interval}s')
-                try:
-                    await self.run()   
-                except Exception as run_error:
-                    logger.error(f"{self.flag}直播检测内部错误\n{repr(run_error)}")
-                state = self.mState
-                timeI = self.interval
-                if state == '1':
-                    timeI = 2
-                logger.info(f'->直播状态：{state}  实际刷新间隔：{timeI}s')
-                await asyncio.sleep(timeI)
+                await self.run()
+                await asyncio.sleep(self.interval)
             except ConnectionError as error:
                 if '直播检测请求协议错误' not in str(error):
                     logger.error(error)
@@ -130,16 +66,10 @@ class LiveRecoder:
             return response
         except httpx.ProtocolError as error:
             raise ConnectionError(f'{self.flag}直播检测请求协议错误\n{error}')
-        except httpx.HTTPStatusError as error:
-            raise ConnectionError(
-                f'{self.flag}直播检测请求状态码错误\n{error}\n{response.text}')
+        except httpx.HTTPError as error:
+            raise ConnectionError(f'{self.flag}直播检测请求错误\n{repr(error)}')
         except anyio.EndOfStream as error:
             raise ConnectionError(f'{self.flag}直播检测代理错误\n{error}')
-        except httpx.HTTPError as error:
-           logger.error(f'网络异常 重试...')
-           raise ConnectionError(f'{self.flag}直播检测请求错误\n{repr(error)}')
-		
-           
 
     def get_client(self):
         client_kwargs = {
@@ -187,9 +117,6 @@ class LiveRecoder:
             'stream-segment-timeout': 60,
             'hls-segment-queue-threshold': 10
         })
-        ssl = self.ssl
-        logger.info(f'是否验证SSL：{ssl}')
-        session.set_option('http-ssl-verify', ssl)
         # 添加streamlink的http相关选项
         if proxy := self.proxy:
             # 代理为socks5时，streamlink的代理参数需要改为socks5h，防止部分直播源获取失败
@@ -230,9 +157,6 @@ class LiveRecoder:
         except Exception as error:
             if 'timeout' in str(error):
                 logger.warning(f'{self.flag}直播录制超时，请检查主播是否正常开播或网络连接是否正常：{filename}\n{error}')
-            elif re.search(f'SSL: CERTIFICATE_VERIFY_FAILED', str(error)):
-                logger.warning(f'{self.flag}SSL错误，将取消SSL验证：{filename}\n{error}')
-                self.ssl = False
             elif re.search(f'(Unable to open URL|No data returned from stream)', str(error)):
                 logger.warning(f'{self.flag}直播流打开错误，请检查主播是否正常开播：{filename}\n{error}')
             else:
@@ -263,28 +187,30 @@ class Bilibili(LiveRecoder):
             )).json()
             if response['data']['live_status'] == 1:
                 title = response['data']['title']
-                stream = self.get_streamlink().streams(url).get('best')  # HTTPStream[flv]
-                match=0
-                if self.whitewords=="":
-                    match=1
-                else:
-                    pattern=re.compile(self.whitewords)
-                    if pattern.search(title):
-                        match=1
-                    else:
-                        match=0
-                        logger.info(f'标题不包含白名单内容:{self.whitewords}，暂不录制')
-                if self.blackwords=="":
-                    match=match+1
-                else:
-                    pattern=re.compile(self.blackwords)
-                    if pattern.search(title):
-                        pass
-                        logger.info(f'标题包含黑名单内容:{self.blackwords}，暂不录制')
-                    else:
-                        match=match+1
-                if match==2:
-                    await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
+                stream = HLSStream(
+                    self.get_streamlink(),
+                    await self.get_play_url()
+                )  # HLSStream[mpegts]
+                await asyncio.to_thread(self.run_record, stream, url, title, 'ts')
+                # stream = self.get_streamlink().streams(url).get('best')  # HTTPStream[flv]
+                # await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
+
+    async def get_play_url(self):
+        response = (await self.request(
+            method='GET',
+            url='https://api.live.bilibili.com/xlive/web-room/v2/index/getRoomPlayInfo',
+            params={
+                'room_id': self.id,
+                'protocol': '1',  # 0 = http_stream, 1 = http_hls
+                'format': '1',  # 0 = flv, 1 = ts, 2 = fmp4
+                'codec': '0',  # 0 = avc, 1 = hevc
+                'qn': 1000,
+                'platform': 'web'
+            }
+        )).json()
+        play_info = response['data']['playurl_info']['playurl']['stream'][0]['format'][0]['codec'][0]
+        url_info = play_info['url_info'][0]
+        return url_info['host'] + play_info['base_url'] + url_info['extra']
 
 
 class Douyu(LiveRecoder):
@@ -295,21 +221,13 @@ class Douyu(LiveRecoder):
                 method='GET',
                 url=f'https://open.douyucdn.cn/api/RoomApi/room/{self.id}',
             )).json()
-            state = response['data']['room_status']
-            self.mState = state
-            logger.info(
-                f'直播状态[1已开播，2未开播]：{state} 上一次开播时间：{response["data"]["start_time"]}')
-            if state == '1':
-                liveUrl = await self.get_live()
-                if liveUrl != '':
-                    title = response['data']['room_name']
-                    stream = HTTPStream(
-                        self.get_streamlink(),
-                        liveUrl
-                    )  # HTTPStream[flv]
-                    await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
-            else:
-                self.ssl = True
+            if response['data']['room_status'] == '1':
+                title = response['data']['room_name']
+                stream = HTTPStream(
+                    self.get_streamlink(),
+                    await self.get_live()
+                )  # HTTPStream[flv]
+                await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
 
     async def get_js(self):
         response = (await self.request(
@@ -317,10 +235,9 @@ class Douyu(LiveRecoder):
             url=f'https://www.douyu.com/swf_api/homeH5Enc?rids={self.id}'
         )).json()
         js_enc = response['data'][f'room{self.id}']
-        getUrl = self.crypto_js_url
         crypto_js = (await self.request(
             method='GET',
-            url= getUrl
+            url='https://cdn.staticfile.org/crypto-js/4.1.1/crypto-js.min.js'
         )).text
         return jsengine.JSEngine(js_enc + crypto_js)
 
@@ -341,9 +258,6 @@ class Douyu(LiveRecoder):
             url=f'https://www.douyu.com/lapi/live/getH5Play/{self.id}',
             params=params
         )).json()
-        if response['data'] == '' and response['msg'] != '':
-            logger.info(f'直播状态：{response["error"]} {response["msg"]}')
-            return ''
         return f"{response['data']['rtmp_url']}/{response['data']['rtmp_live']}"
 
 
@@ -365,59 +279,31 @@ class Douyin(LiveRecoder):
     async def run(self):
         url = f'https://live.douyin.com/{self.id}'
         if url not in recording:
-            try:
-                if not self.client.cookies:
-                    await self.client.get(url='https://live.douyin.com/')  # 获取ttwid
-            except Exception as e: 
-                logger.error(f"get Douyin ttwid fail with error {e}")
-            try:
-                response = (await self.request(
-                    method='GET',
-                    url='https://live.douyin.com/webcast/room/web/enter/',
-                    params={
-                        'aid': 6383,
-                        'device_platform': 'web',
-                        'browser_language': 'zh-CN',
-                        'browser_platform': 'Win32',
-                        'browser_name': 'Chrome',
-                        'browser_version': '100.0.0.0',
-                        'web_rid': self.id
-                    },
-                )).json()
-                if data := response['data']['data']:
-                    data = data[0]
-                    if data['status'] == 2:
-                        title = data['title']
-                        live_url = ''
-                        stream_data = json.loads(data['stream_url']['live_core_sdk_data']['pull_data']['stream_data'])
-                        for quality_code in ('origin', 'uhd', 'hd', 'sd', 'md', 'ld'):
-                            if quality_data := stream_data['data'].get(quality_code):
-                                live_url = quality_data['main']['flv']
-                                break
-                        stream = HTTPStream(
-                            self.get_streamlink(),
-                            live_url
-                        )  # HTTPStream[flv]
-                        await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
-            except Exception as e:
-                logger.warning(f'{self.flag} 接口解析失败，尝试使用 Streamlink 直接录制：{e}')
+            if not self.client.cookies:
+                await self.client.get(url='https://live.douyin.com/')  # 获取ttwid
+            response = (await self.request(
+                method='GET',
+                url='https://live.douyin.com/webcast/room/web/enter/',
+                params={
+                    'aid': 6383,
+                    'device_platform': 'web',
+                    'browser_language': 'zh-CN',
+                    'browser_platform': 'Win32',
+                    'browser_name': 'Chrome',
+                    'browser_version': '100.0.0.0',
+                    'web_rid': self.id
+                },
+            )).json()
+            if data := response['data']['data']:
+                data = data[0]
+                if data['status'] == 2:
+                    title = data['title']
+                    stream = HTTPStream(
+                        self.get_streamlink(),
+                        data['stream_url']['flv_pull_url']['FULL_HD1']
+                    )  # HTTPStream[flv]
+                    await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
 
-                try:
-                    session = self.get_streamlink()
-                    streams = session.streams(f'https://live.douyin.com/{self.id}')
-                    if not streams:
-                        logger.error(f'{self.flag} Streamlink 无法获取直播源')
-                        return
-
-                    best_stream = streams.get('best')
-                    if not best_stream:
-                        logger.error(f'{self.flag} Streamlink 未找到最佳流')
-                        return
-                    title='streamlink'
-                    await asyncio.to_thread(self.run_record, best_stream, url, title, 'flv')
-
-                except Exception as err:
-                    logger.error(f'{self.flag} Streamlink 录制失败：{err}')
 
 class Youtube(LiveRecoder):
     async def run(self):
@@ -450,27 +336,7 @@ class Youtube(LiveRecoder):
                 if url not in recording:
                     stream = self.get_streamlink().streams(url).get('best')  # HLSStream[mpegts]
                     # FIXME:多开直播间中断
-                    match=0
-                    if self.whitewords=="":
-                        match=1
-                    else:
-                        pattern=re.compile(self.whitewords)
-                        if pattern.search(title):
-                            match=1
-                        else:
-                            match=0
-                            logger.info(f'标题不包含白名单内容:{self.whitewords}，暂不录制')
-                    if self.blackwords=="":
-                        match=match+1
-                    else:
-                        pattern=re.compile(self.blackwords)
-                        if pattern.search(title):
-                            pass
-                            logger.info(f'标题包含黑名单内容:{self.blackwords}，暂不录制')
-                        else:
-                            match=match+1
-                    if match==2:
-                        asyncio.create_task(asyncio.to_thread(self.run_record, stream, url, title, 'ts'))
+                    asyncio.create_task(asyncio.to_thread(self.run_record, stream, url, title, 'ts'))
 
 
 class Twitch(LiveRecoder):
@@ -610,30 +476,6 @@ class Pixivsketch(LiveRecoder):
                     url=live['owner']['hls_movie']
                 )
                 stream = list(streams.values())[0]  # HLSStream[mpegts]
-                await asyncio.to_thread(self.run_record, stream, url, title, 'ts')
-
-
-class Chaturbate(LiveRecoder):
-    async def run(self):
-        url = f'https://chaturbate.com/{self.id}'
-        if url not in recording:
-            response = (await self.request(
-                method='POST',
-                url='https://chaturbate.com/get_edge_hls_url_ajax/',
-                headers={
-                    'X-Requested-With': 'XMLHttpRequest'
-                },
-                data={
-                    'room_slug': self.id
-                }
-            )).json()
-            if response['room_status'] == 'public':
-                title = self.id
-                streams = HLSStream.parse_variant_playlist(
-                    session=self.get_streamlink(),
-                    url=response['url']
-                )
-                stream = list(streams.values())[2]
                 await asyncio.to_thread(self.run_record, stream, url, title, 'ts')
 
 

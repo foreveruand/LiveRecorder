@@ -38,7 +38,7 @@ class LiveRecoder:
         
         self.interval = user.get('interval', 10)
         self.crypto_js_url = user.get('crypto_js_url', '')
-        self.headers = user.get('headers', {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36 Edg/127.0.0.0'})
+        self.headers = user.get('headers', {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36'})
         self.cookies = user.get('cookies')
         self.format = user.get('format')
         self.proxy = user.get('proxy', config.get('proxy'))
@@ -60,11 +60,13 @@ class LiveRecoder:
         if not field:
             return False
  
-        # 解析时间段和时区
-        if '/' in field:
-            range_part, tz_name = field.rsplit('/', 1)
-        else:
-            range_part, tz_name = field, ''
+        range_part, tz_name = field, ''
+        for sep in ('/', ' '):
+            if sep in field:
+                parts = field.rsplit(sep, 1)
+                if len(parts) == 2 and parts[1].strip():
+                    range_part, tz_name = parts[0].strip(), parts[1].strip()
+                    break
  
         try:
             tz = ZoneInfo(tz_name) if tz_name else None
@@ -201,9 +203,6 @@ class LiveRecoder:
         ssl = self.ssl
         logger.info(f'是否验证SSL：{ssl}')
         session.set_option('http-ssl-verify', ssl)
-        ssl = self.ssl
-        logger.info(f'是否验证SSL：{ssl}')
-        session.set_option('http-ssl-verify', ssl)
         # 添加streamlink的http相关选项
         if proxy := self.proxy:
             # 代理为socks5时，streamlink的代理参数需要改为socks5h，防止部分直播源获取失败
@@ -273,11 +272,12 @@ class Bilibili(LiveRecoder):
     async def run(self):
         url = f'https://live.bilibili.com/{self.id}'
         if url not in recording:
-            response = (await self.request(
+            req = await self.request(
                 method='GET',
                 url='https://api.live.bilibili.com/room/v1/Room/get_info',
                 params={'room_id': self.id}
-            )).json()
+            )
+            response = req.json()
             if response['data']['live_status'] == 1:
                 title = response['data']['title']
                 stream = self.get_streamlink().streams(url).get('best')  # HTTPStream[flv]
@@ -327,21 +327,6 @@ class Douyu(LiveRecoder):
                     await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
             else:
                 self.ssl = True
-            state = response['data']['room_status']
-            self.mState = state
-            logger.info(
-                f'直播状态[1已开播，2未开播]：{state} 上一次开播时间：{response["data"]["start_time"]}')
-            if state == '1':
-                liveUrl = await self.get_live()
-                if liveUrl != '':
-                    title = response['data']['room_name']
-                    stream = HTTPStream(
-                        self.get_streamlink(),
-                        liveUrl
-                    )  # HTTPStream[flv]
-                    await asyncio.to_thread(self.run_record, stream, url, title, 'flv')
-            else:
-                self.ssl = True
 
     async def get_js(self):
         response = (await self.request(
@@ -349,12 +334,9 @@ class Douyu(LiveRecoder):
             url=f'https://www.douyu.com/swf_api/homeH5Enc?rids={self.id}'
         )).json()
         js_enc = response['data'][f'room{self.id}']
-        getUrl = self.crypto_js_url
-        getUrl = self.crypto_js_url
         crypto_js = (await self.request(
             method='GET',
-            url= getUrl
-            url= getUrl
+            url=self.crypto_js_url
         )).text
         return jsengine.JSEngine(js_enc + crypto_js)
 
@@ -375,9 +357,6 @@ class Douyu(LiveRecoder):
             url=f'https://www.douyu.com/lapi/live/getH5Play/{self.id}',
             params=params
         )).json()
-        if response['data'] == '' and response['msg'] != '':
-            logger.info(f'直播状态：{response["error"]} {response["msg"]}')
-            return ''
         if response['data'] == '' and response['msg'] != '':
             logger.info(f'直播状态：{response["error"]} {response["msg"]}')
             return ''
